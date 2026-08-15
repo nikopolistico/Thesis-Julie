@@ -83,7 +83,7 @@ async function handleSubmit() {
         class="pointer-events-none absolute inset-0 -z-10 bg-[radial-gradient(circle_at_top_left,var(--color-primary),transparent_45%)]/[0.06]"
       />
       <a
-        href="/landingp"
+        href="/"
         class="absolute left-6 top-6 flex items-center gap-1.5 text-sm text-muted-foreground transition-colors hover:text-foreground sm:left-12 lg:left-20"
       >
         <ArrowLeft class="h-4 w-4" />
@@ -91,7 +91,7 @@ async function handleSubmit() {
       </a>
 
       <div class="mx-auto w-full max-w-sm">
-        <a href="/landingp" class="flex items-center gap-2.5 font-semibold tracking-tight">
+        <a href="/" class="flex items-center gap-2.5 font-semibold tracking-tight">
           <span class="flex h-10 w-10 items-center justify-center rounded-xl bg-primary text-primary-foreground shadow-lg shadow-primary/25">
             <Activity class="h-5 w-5" />
           </span>
