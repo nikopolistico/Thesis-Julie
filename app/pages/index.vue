@@ -20,8 +20,10 @@ import {
   AlertTriangle,
   Menu,
   X,
+  Sun,
+  Moon,
 } from '@lucide/vue'
-import { ref } from 'vue'
+import { onMounted, ref } from 'vue'
 
 useHead({
   title: 'AHDMS — Automated Hospital Discharge Management System',
@@ -33,6 +35,9 @@ useHead({
     },
   ],
 })
+
+const { isDark, init: initDarkMode, toggle: toggleDarkMode } = useDarkMode()
+onMounted(initDarkMode)
 
 const mobileNavOpen = ref(false)
 
@@ -147,7 +152,15 @@ const techStack = [
           >{{ link.label }}</a>
         </nav>
 
-        <div class="hidden md:block">
+        <div class="hidden items-center gap-3 md:flex">
+          <button
+            :aria-label="isDark ? 'Switch to light mode' : 'Switch to dark mode'"
+            class="text-muted-foreground hover:text-foreground"
+            @click="toggleDarkMode"
+          >
+            <Sun v-if="isDark" class="h-5 w-5" />
+            <Moon v-else class="h-5 w-5" />
+          </button>
           <a
             href="/loginpage"
             class="inline-flex items-center gap-1.5 rounded-md bg-primary px-4 py-2 text-sm font-medium text-primary-foreground transition-opacity hover:opacity-90"
@@ -157,14 +170,31 @@ const techStack = [
           </a>
         </div>
 
-        <button
-          class="text-foreground md:hidden"
-          aria-label="Toggle navigation menu"
-          @click="mobileNavOpen = !mobileNavOpen"
-        >
-          <Menu v-if="!mobileNavOpen" class="h-6 w-6" />
-          <X v-else class="h-6 w-6" />
-        </button>
+        <div class="flex items-center gap-3 md:hidden">
+          <button
+            :aria-label="isDark ? 'Switch to light mode' : 'Switch to dark mode'"
+            class="text-muted-foreground hover:text-foreground"
+            @click="toggleDarkMode"
+          >
+            <Sun v-if="isDark" class="h-5 w-5" />
+            <Moon v-else class="h-5 w-5" />
+          </button>
+          <a
+            href="/loginpage"
+            class="inline-flex items-center gap-1 rounded-md bg-primary px-3 py-1.5 text-xs font-medium whitespace-nowrap text-primary-foreground transition-opacity hover:opacity-90"
+          >
+            See the System
+            <ArrowRight class="h-3.5 w-3.5" />
+          </a>
+          <button
+            class="text-foreground"
+            aria-label="Toggle navigation menu"
+            @click="mobileNavOpen = !mobileNavOpen"
+          >
+            <Menu v-if="!mobileNavOpen" class="h-6 w-6" />
+            <X v-else class="h-6 w-6" />
+          </button>
+        </div>
       </div>
 
       <div v-if="mobileNavOpen" class="border-t border-border/60 px-6 py-4 md:hidden">

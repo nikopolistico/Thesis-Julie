@@ -12,8 +12,10 @@ import {
   LoaderCircle,
   LogIn,
   Mail,
+  Sun,
+  Moon,
 } from '@lucide/vue'
-import { ref } from 'vue'
+import { onMounted, ref } from 'vue'
 
 const brandHighlights = [
   { icon: ClipboardList, text: 'Digitized charts & records' },
@@ -30,6 +32,9 @@ useHead({
     },
   ],
 })
+
+const { isDark, init: initDarkMode, toggle: toggleDarkMode } = useDarkMode()
+onMounted(initDarkMode)
 
 const supabase = useSupabaseClient()
 const session = useAdminSession()
@@ -89,6 +94,15 @@ async function handleSubmit() {
         <ArrowLeft class="h-4 w-4" />
         Back to Landing Page
       </a>
+
+      <button
+        :aria-label="isDark ? 'Switch to light mode' : 'Switch to dark mode'"
+        class="absolute right-6 top-6 text-muted-foreground transition-colors hover:text-foreground sm:right-12 lg:right-20"
+        @click="toggleDarkMode"
+      >
+        <Sun v-if="isDark" class="h-5 w-5" />
+        <Moon v-else class="h-5 w-5" />
+      </button>
 
       <div class="mx-auto w-full max-w-sm">
         <a href="/" class="flex items-center gap-2.5 font-semibold tracking-tight">
