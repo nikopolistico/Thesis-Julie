@@ -19,11 +19,13 @@ import {
   UserPlus,
   Users,
   X,
+  XCircle,
 } from '@lucide/vue'
 import { computed, onMounted, ref } from 'vue'
 
 definePageMeta({
   middleware: 'auth',
+  requiredRole: 'admin',
 })
 
 useHead({
@@ -39,9 +41,9 @@ useHead({
 const supabase = useSupabaseClient()
 const session = useAdminSession()
 const officerId = computed(() => Number(session.value?.id))
+const officerFullName = computed(() => session.value?.fullName ?? '')
 
-const { name: officerName, initials: officerInitials, loadOfficerName } = useOfficerName()
-onMounted(() => loadOfficerName(officerId.value))
+const { initials: officerInitials } = useOfficerName(officerFullName)
 
 const { isDark, init: initDarkMode, toggle: toggleDarkMode } = useDarkMode()
 onMounted(initDarkMode)
@@ -85,7 +87,7 @@ async function loadStaff() {
   isLoadingStaff.value = true
   staffError.value = ''
 
-  const { data, error } = await supabase.rpc('list_officers_with_duty')
+  const { data, error } = await supabase.rpc('list_officers')
   if (error) {
     staffError.value = error.message
   } else {
@@ -98,20 +100,19 @@ async function loadStaff() {
 onMounted(loadStaff)
 
 async function toggleDutyStatus(officer: Officer) {
-  const nextStatus = officer.duty_status === 'on duty' ? 'off duty' : 'on duty'
+  const nextStatus = officer.duty_status === 'on_duty' ? 'off_duty' : 'on_duty'
   updatingOfficerId.value = officer.officer_id
 
-  const { error } = await supabase.rpc('set_officer_duty_status', {
+  const { error } = await supabase.rpc('set_duty_status', {
     p_officer_id: officer.officer_id,
     p_duty_status: nextStatus,
-    p_admin_id: officerId.value,
   })
 
   if (!error) await loadStaff()
   updatingOfficerId.value = null
 }
 
-const roleOptions = ['nurse', 'doctor', 'admin']
+const roleOptions = ['nurse', 'doctor', 'billing', 'admin']
 const emptyStaffForm = { full_name: '', email: '', password: '', role: 'nurse' }
 const newStaffForm = ref({ ...emptyStaffForm })
 const showRegisterStaffForm = ref(false)
@@ -128,7 +129,7 @@ async function registerStaff() {
   isRegisteringStaff.value = true
   registerStaffError.value = ''
 
-  const { error } = await supabase.rpc('register_staff', {
+  const { error } = await supabase.rpc('register_officer', {
     p_email: newStaffForm.value.email,
     p_password: newStaffForm.value.password,
     p_full_name: newStaffForm.value.full_name,
@@ -147,7 +148,7 @@ async function registerStaff() {
   await loadStaff()
 }
 
-// ── Discharge Queue: approved, billing not yet verified ──────────────────
+// ── Discharge requests (hospital-wide) ──────────────────────────────────
 
 interface DischargeRequest {
   request_id: number
@@ -157,8 +158,15 @@ interface DischargeRequest {
   approved_by_name: string | null
   status: string
   billing_verified: boolean
-  discharge_date: string | null
   timestamp: string
+}
+
+const requestStatusColor: Record<string, string> = {
+  pending: '#fab219',
+  in_progress: '#2a78d6',
+  approved: '#0ca30c',
+  completed: '#898781',
+  rejected: '#d03b3b',
 }
 
 const dischargeRequests = ref<DischargeRequest[]>([])
@@ -169,7 +177,7 @@ async function loadDischargeRequests() {
   isLoadingDischargeRequests.value = true
   dischargeRequestsError.value = ''
 
-  const { data, error } = await supabase.rpc('list_all_discharge_requests')
+  const { data, error } = await supabase.rpc('list_discharge_requests_detailed', { p_status: null })
   if (error) {
     dischargeRequestsError.value = error.message
   } else {
@@ -181,23 +189,22 @@ async function loadDischargeRequests() {
 
 onMounted(loadDischargeRequests)
 
-const pendingBillingRequests = computed(() =>
-  dischargeRequests.value.filter((r) => r.status === 'Approved' && !r.billing_verified))
+const approvedAwaitingCompletion = computed(() =>
+  dischargeRequests.value.filter((r) => r.status === 'approved'))
 
 // ── Patients (read-only, hospital-wide) ──────────────────────────────────
 
 interface Patient {
-  id: number
+  patient_id: number
   full_name: string
-  admission_date: string
-  philhealth_no: string
-  officer_id: number
-  age: number | null
   date_of_birth: string | null
+  age: number | null
   contact_number: string | null
   emergency_contact: string | null
-  room_number: number | null
+  admission_date: string
   discharge_date: string | null
+  room_number: number | null
+  philhealth_no: string | null
 }
 
 const patients = ref<Patient[]>([])
@@ -227,7 +234,7 @@ const filteredPatients = computed(() => {
   if (!q) return patients.value
   return patients.value.filter((patient) => {
     return patient.full_name.toLowerCase().includes(q)
-      || patient.philhealth_no.toLowerCase().includes(q)
+      || (patient.philhealth_no ?? '').toLowerCase().includes(q)
       || (patient.contact_number ?? '').toLowerCase().includes(q)
       || String(patient.room_number ?? '').includes(q)
   })
@@ -246,86 +253,86 @@ const viewingPatientFields = computed(() => {
     { label: 'Emergency contact', value: p.emergency_contact ?? '—' },
     { label: 'Admission date', value: p.admission_date },
     { label: 'Room number', value: p.room_number ?? '—' },
-    { label: 'PhilHealth No.', value: p.philhealth_no },
+    { label: 'PhilHealth No.', value: p.philhealth_no ?? '—' },
     { label: 'Discharge date', value: p.discharge_date ?? '—' },
   ]
 })
 
-const statTiles = [
-  {
-    icon: Users,
-    label: 'Patients in Queue',
-    value: '8',
-    delta: '+2 vs yesterday',
-    trend: 'up',
-  },
-  {
-    icon: Stethoscope,
-    label: 'Nurses on Duty',
-    value: '4',
-    delta: 'of 5 scheduled',
-    trend: 'flat',
-  },
-  {
-    icon: CheckCircle2,
-    label: 'Completed Today',
-    value: '13',
-    delta: '+5 vs yesterday',
-    trend: 'up',
-  },
-  {
-    icon: AlertTriangle,
-    label: 'Delayed Cases',
-    value: '3',
-    delta: '-1 vs yesterday',
-    trend: 'down',
-  },
-]
+// ── Overview: real stats derived from loaded data ───────────────────────
 
-// Status colors are fixed per the design system's status palette — never themed,
-// mode-invariant, always paired with an icon + label (never color alone).
-const dischargeStatus = [
-  { label: 'Completed', count: 13, color: '#0ca30c', icon: CheckCircle2 },
-  { label: 'In Progress', count: 6, color: '#fab219', icon: Clock },
-  { label: 'Pending', count: 5, color: '#c3c2b7', icon: Circle },
-  { label: 'Delayed', count: 3, color: '#d03b3b', icon: AlertTriangle },
-]
-const statusTotal = computed(() => dischargeStatus.reduce((sum, s) => sum + s.count, 0))
+const onDutyCount = computed(() => officers.value.filter((o) => o.duty_status === 'on_duty').length)
+const patientsInQueue = computed(() => patients.value.filter((p) => !p.discharge_date).length)
+
+const statTiles = computed(() => [
+  { icon: Users, label: 'Patients in Queue', value: String(patientsInQueue.value) },
+  { icon: Stethoscope, label: 'Staff on Duty', value: `${onDutyCount.value} of ${officers.value.length}` },
+  { icon: CheckCircle2, label: 'Completed Discharges', value: String(dischargeRequests.value.filter((r) => r.status === 'completed').length) },
+  { icon: AlertTriangle, label: 'Awaiting Billing', value: String(dischargeRequests.value.filter((r) => !r.billing_verified && r.status !== 'rejected' && r.status !== 'completed').length) },
+])
+
+const dischargeStatusIcon: Record<string, typeof Clock> = {
+  pending: Clock,
+  in_progress: Clock,
+  approved: CheckCircle2,
+  rejected: XCircle,
+  completed: Circle,
+}
+
+const dischargeStatus = computed(() => {
+  const order = ['pending', 'in_progress', 'approved', 'completed', 'rejected']
+  return order.map((label) => ({
+    label,
+    count: dischargeRequests.value.filter((r) => r.status === label).length,
+    color: requestStatusColor[label],
+    icon: dischargeStatusIcon[label],
+  }))
+})
+const statusTotal = computed(() => dischargeStatus.value.reduce((sum, s) => sum + s.count, 0))
 const hoveredStatus = ref<number | null>(null)
 
-const weeklyTrend = [
-  { day: 'Mon', count: 9, lastWeek: 7 },
-  { day: 'Tue', count: 12, lastWeek: 11 },
-  { day: 'Wed', count: 8, lastWeek: 10 },
-  { day: 'Thu', count: 14, lastWeek: 9 },
-  { day: 'Fri', count: 16, lastWeek: 13 },
-  { day: 'Sat', count: 7, lastWeek: 6 },
-  { day: 'Sun', count: 13, lastWeek: 8 },
-]
-const weeklyMax = computed(() =>
-  Math.max(...weeklyTrend.map((d) => Math.max(d.count, d.lastWeek))),
-)
-const weeklyTotal = computed(() => weeklyTrend.reduce((sum, d) => sum + d.count, 0))
-const lastWeekTotal = computed(() => weeklyTrend.reduce((sum, d) => sum + d.lastWeek, 0))
-const weeklyDeltaPct = computed(() =>
-  Math.round(((weeklyTotal.value - lastWeekTotal.value) / lastWeekTotal.value) * 100),
-)
-const hoveredDay = ref<number | null>(null)
-
-const recentActivity = [
-  { patient: 'Patient #2291', action: 'Physician sign-off completed', time: '4 minutes ago', status: 'Completed' },
-  { patient: 'Patient #2288', action: 'Billing clearance pending review', time: '18 minutes ago', status: 'Pending' },
-  { patient: 'Patient #2276', action: 'Medication review flagged for delay', time: '32 minutes ago', status: 'Delayed' },
-  { patient: 'Patient #2270', action: 'Discharge documents digitized', time: '1 hour ago', status: 'In Progress' },
-  { patient: 'Patient #2265', action: 'Discharge completed', time: '2 hours ago', status: 'Completed' },
-]
-
-const statusStyles: Record<string, string> = {
-  Completed: 'bg-[#0ca30c]/10 text-[#0ca30c]',
-  'In Progress': 'bg-[#fab219]/15 text-[#a16207]',
-  Pending: 'bg-muted text-muted-foreground',
-  Delayed: 'bg-[#d03b3b]/10 text-[#d03b3b]',
+// Discharges per day, current week (Mon–Sun) vs. the same weekday last
+// week, counted off patients.discharge_date.
+function startOfWeek(date: Date) {
+  const d = new Date(date)
+  const day = d.getDay()
+  const diff = (day === 0 ? -6 : 1) - day
+  d.setDate(d.getDate() + diff)
+  d.setHours(0, 0, 0, 0)
+  return d
 }
+
+function countDischargesOnDay(weekStart: Date, dayOffset: number) {
+  const dayStart = new Date(weekStart)
+  dayStart.setDate(dayStart.getDate() + dayOffset)
+  const dayEnd = new Date(dayStart)
+  dayEnd.setDate(dayEnd.getDate() + 1)
+  return patients.value.filter((p) => {
+    if (!p.discharge_date) return false
+    const d = new Date(p.discharge_date)
+    return d >= dayStart && d < dayEnd
+  }).length
+}
+
+const weeklyTrend = computed(() => {
+  const dayLabels = ['Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat', 'Sun']
+  const thisWeekStart = startOfWeek(new Date())
+  const lastWeekStart = new Date(thisWeekStart)
+  lastWeekStart.setDate(lastWeekStart.getDate() - 7)
+
+  return dayLabels.map((day, i) => ({
+    day,
+    count: countDischargesOnDay(thisWeekStart, i),
+    lastWeek: countDischargesOnDay(lastWeekStart, i),
+  }))
+})
+const weeklyMax = computed(() => Math.max(1, ...weeklyTrend.value.map((d) => Math.max(d.count, d.lastWeek))))
+const weeklyTotal = computed(() => weeklyTrend.value.reduce((sum, d) => sum + d.count, 0))
+const lastWeekTotal = computed(() => weeklyTrend.value.reduce((sum, d) => sum + d.lastWeek, 0))
+const weeklyDeltaPct = computed(() => {
+  if (lastWeekTotal.value === 0) return weeklyTotal.value === 0 ? 0 : 100
+  return Math.round(((weeklyTotal.value - lastWeekTotal.value) / lastWeekTotal.value) * 100)
+})
+const hoveredDay = ref<number | null>(null)
 </script>
 
 <template>
@@ -361,7 +368,7 @@ const statusStyles: Record<string, string> = {
             {{ officerInitials || 'AD' }}
           </span>
           <div class="min-w-0 flex-1 leading-tight">
-            <p class="truncate text-sm font-medium">{{ officerName || 'Admin' }}</p>
+            <p class="truncate text-sm font-medium">{{ officerFullName || 'Admin' }}</p>
             <p class="truncate text-xs text-muted-foreground">System Administrator</p>
           </div>
         </div>
@@ -414,7 +421,7 @@ const statusStyles: Record<string, string> = {
               {{ officerInitials || 'AD' }}
             </span>
             <div class="min-w-0 flex-1 leading-tight">
-              <p class="truncate text-sm font-medium">{{ officerName || 'Admin' }}</p>
+              <p class="truncate text-sm font-medium">{{ officerFullName || 'Admin' }}</p>
               <p class="truncate text-xs text-muted-foreground">System Administrator</p>
             </div>
           </div>
@@ -465,7 +472,7 @@ const statusStyles: Record<string, string> = {
 
         <button aria-label="Notifications" class="relative text-muted-foreground hover:text-foreground">
           <Bell class="h-5 w-5" />
-          <span class="absolute -right-0.5 -top-0.5 h-2 w-2 rounded-full bg-[#d03b3b]" />
+          <span v-if="approvedAwaitingCompletion.length > 0" class="absolute -right-0.5 -top-0.5 h-2 w-2 rounded-full bg-[#d03b3b]" />
         </button>
 
         <span class="flex h-8 w-8 items-center justify-center rounded-full bg-secondary text-xs font-medium text-secondary-foreground">
@@ -482,22 +489,11 @@ const statusStyles: Record<string, string> = {
             :key="tile.label"
             class="rounded-xl border border-border bg-card p-5"
           >
-            <div class="flex items-center justify-between">
-              <span class="flex h-9 w-9 items-center justify-center rounded-lg bg-primary/10">
-                <component :is="tile.icon" class="h-4.5 w-4.5 text-primary" />
-              </span>
-              <span
-                v-if="tile.trend !== 'flat'"
-                class="flex items-center gap-1 text-xs font-medium"
-                :class="tile.trend === 'up' ? 'text-[#0ca30c]' : 'text-[#d03b3b]'"
-              >
-                <TrendingUp v-if="tile.trend === 'up'" class="h-3.5 w-3.5" />
-                <TrendingUp v-else class="h-3.5 w-3.5 rotate-180" />
-              </span>
-            </div>
+            <span class="flex h-9 w-9 items-center justify-center rounded-lg bg-primary/10">
+              <component :is="tile.icon" class="h-4.5 w-4.5 text-primary" />
+            </span>
             <p class="mt-4 text-2xl font-semibold tracking-tight tabular-nums">{{ tile.value }}</p>
             <p class="mt-1 text-sm text-muted-foreground">{{ tile.label }}</p>
-            <p class="mt-2 text-xs text-muted-foreground">{{ tile.delta }}</p>
           </div>
         </div>
 
@@ -507,7 +503,7 @@ const statusStyles: Record<string, string> = {
             <div class="flex flex-wrap items-start justify-between gap-3">
               <div>
                 <h2 class="text-sm font-medium">Discharges This Week</h2>
-                <p class="text-xs text-muted-foreground">Completed discharges per day vs. last week</p>
+                <p class="text-xs text-muted-foreground">Finalized discharges per day vs. last week</p>
               </div>
               <span
                 class="flex items-center gap-1 text-xs font-medium"
@@ -569,70 +565,53 @@ const statusStyles: Record<string, string> = {
           <!-- Discharge status breakdown -->
           <div class="rounded-xl border border-border bg-card p-5">
             <h2 class="text-sm font-medium">Discharge Status</h2>
-            <p class="text-xs text-muted-foreground">{{ statusTotal }} patients today</p>
+            <p class="text-xs text-muted-foreground">{{ statusTotal }} discharge request{{ statusTotal === 1 ? '' : 's' }}, hospital-wide</p>
 
-            <div class="mt-5 flex h-3 w-full overflow-hidden rounded-full bg-muted">
-              <div
-                v-for="(status, i) in dischargeStatus"
-                :key="status.label"
-                class="h-full transition-opacity"
-                :style="{
-                  width: `${(status.count / statusTotal) * 100}%`,
-                  backgroundColor: status.color,
-                  opacity: hoveredStatus === null || hoveredStatus === i ? 1 : 0.35,
-                }"
-                @mouseenter="hoveredStatus = i"
-                @mouseleave="hoveredStatus = null"
-              />
+            <div v-if="statusTotal === 0" class="flex h-24 items-center justify-center text-sm text-muted-foreground">
+              No discharge requests yet.
             </div>
+            <template v-else>
+              <div class="mt-5 flex h-3 w-full overflow-hidden rounded-full bg-muted">
+                <div
+                  v-for="(status, i) in dischargeStatus"
+                  :key="status.label"
+                  class="h-full transition-opacity"
+                  :style="{
+                    width: `${(status.count / statusTotal) * 100}%`,
+                    backgroundColor: status.color,
+                    opacity: hoveredStatus === null || hoveredStatus === i ? 1 : 0.35,
+                  }"
+                  @mouseenter="hoveredStatus = i"
+                  @mouseleave="hoveredStatus = null"
+                />
+              </div>
 
-            <ul class="mt-5 space-y-3">
-              <li
-                v-for="(status, i) in dischargeStatus"
-                :key="status.label"
-                class="flex items-center justify-between text-sm"
-                @mouseenter="hoveredStatus = i"
-                @mouseleave="hoveredStatus = null"
-              >
-                <span class="flex items-center gap-2">
-                  <component :is="status.icon" class="h-4 w-4" :style="{ color: status.color }" />
-                  <span :class="hoveredStatus !== null && hoveredStatus !== i ? 'text-muted-foreground' : ''">
-                    {{ status.label }}
+              <ul class="mt-5 space-y-3">
+                <li
+                  v-for="(status, i) in dischargeStatus"
+                  :key="status.label"
+                  class="flex items-center justify-between text-sm"
+                  @mouseenter="hoveredStatus = i"
+                  @mouseleave="hoveredStatus = null"
+                >
+                  <span class="flex items-center gap-2">
+                    <component :is="status.icon" class="h-4 w-4" :style="{ color: status.color }" />
+                    <span class="capitalize" :class="hoveredStatus !== null && hoveredStatus !== i ? 'text-muted-foreground' : ''">
+                      {{ status.label.replace('_', ' ') }}
+                    </span>
                   </span>
-                </span>
-                <span class="font-medium tabular-nums">{{ status.count }}</span>
-              </li>
-            </ul>
+                  <span class="font-medium tabular-nums">{{ status.count }}</span>
+                </li>
+              </ul>
+            </template>
           </div>
-        </div>
-
-        <!-- Recent activity -->
-        <div class="rounded-xl border border-border bg-card p-5">
-          <h2 class="text-sm font-medium">Recent Activity</h2>
-          <p class="text-xs text-muted-foreground">Latest updates across the discharge queue</p>
-
-          <ul class="mt-4 divide-y divide-border">
-            <li v-for="item in recentActivity" :key="item.patient + item.time" class="flex items-center gap-3 py-3">
-              <span class="min-w-0 flex-1">
-                <span class="block text-sm font-medium">{{ item.patient }}</span>
-                <span class="block truncate text-xs text-muted-foreground">{{ item.action }}</span>
-              </span>
-              <span
-                class="shrink-0 rounded-full px-2.5 py-1 text-xs font-medium"
-                :class="statusStyles[item.status]"
-              >
-                {{ item.status }}
-              </span>
-              <span class="hidden shrink-0 text-xs text-muted-foreground sm:block">{{ item.time }}</span>
-            </li>
-          </ul>
         </div>
         </template>
 
         <!-- Discharge Queue -->
         <div v-if="activeSection === 'discharge-queue'" class="rounded-xl border border-border bg-card p-5">
           <h2 class="text-sm font-medium">Discharge Queue</h2>
-          <p class="text-xs text-muted-foreground">Approved by a doctor, awaiting billing verification</p>
+          <p class="text-xs text-muted-foreground">Approved by a doctor, awaiting final completion</p>
 
           <div v-if="dischargeRequestsError" class="mt-4 flex items-center gap-2 rounded-md bg-[#d03b3b]/10 px-3 py-2.5 text-sm text-[#d03b3b]">
             <AlertTriangle class="h-4 w-4 shrink-0" />
@@ -646,18 +625,18 @@ const statusStyles: Record<string, string> = {
                   <th class="pb-2 pr-4 font-medium">Patient</th>
                   <th class="pb-2 pr-4 font-medium">Requested By</th>
                   <th class="pb-2 pr-4 font-medium">Approved By</th>
-                  <th class="pb-2 font-medium">Approved</th>
+                  <th class="pb-2 font-medium">Submitted</th>
                 </tr>
               </thead>
               <tbody class="divide-y divide-border">
-                <tr v-for="request in pendingBillingRequests" :key="request.request_id">
+                <tr v-for="request in approvedAwaitingCompletion" :key="request.request_id">
                   <td class="py-2 pr-4 font-medium">{{ request.patient_name }}</td>
                   <td class="py-2 pr-4 text-muted-foreground">{{ request.requested_by_name }}</td>
                   <td class="py-2 pr-4 text-muted-foreground">{{ request.approved_by_name ?? '—' }}</td>
-                  <td class="py-2 text-muted-foreground">{{ request.discharge_date ?? '—' }}</td>
+                  <td class="py-2 text-muted-foreground">{{ new Date(request.timestamp).toLocaleString() }}</td>
                 </tr>
-                <tr v-if="!isLoadingDischargeRequests && pendingBillingRequests.length === 0">
-                  <td colspan="4" class="py-6 text-center text-sm text-muted-foreground">No approved requests are awaiting billing verification.</td>
+                <tr v-if="!isLoadingDischargeRequests && approvedAwaitingCompletion.length === 0">
+                  <td colspan="4" class="py-6 text-center text-sm text-muted-foreground">No approved requests are awaiting completion.</td>
                 </tr>
               </tbody>
             </table>
@@ -691,11 +670,11 @@ const statusStyles: Record<string, string> = {
                 </tr>
               </thead>
               <tbody class="divide-y divide-border">
-                <tr v-for="patient in filteredPatients" :key="patient.id">
+                <tr v-for="patient in filteredPatients" :key="patient.patient_id">
                   <td class="py-2 pr-4 font-medium">{{ patient.full_name }}</td>
                   <td class="py-2 pr-4 text-muted-foreground">{{ patient.admission_date }}</td>
                   <td class="py-2 pr-4 text-muted-foreground">{{ patient.room_number ?? '—' }}</td>
-                  <td class="py-2 pr-4 text-muted-foreground">{{ patient.philhealth_no }}</td>
+                  <td class="py-2 pr-4 text-muted-foreground">{{ patient.philhealth_no ?? '—' }}</td>
                   <td class="py-2 pr-4 text-muted-foreground">{{ patient.discharge_date ?? '—' }}</td>
                   <td class="py-2 text-right">
                     <button type="button" class="text-xs font-medium text-primary hover:underline" @click="viewingPatient = patient">
@@ -752,11 +731,11 @@ const statusStyles: Record<string, string> = {
                       <button
                         type="button"
                         :disabled="updatingOfficerId === officer.officer_id"
-                        class="rounded-full px-2.5 py-1 text-xs font-medium transition-opacity hover:opacity-80 disabled:cursor-not-allowed disabled:opacity-60"
-                        :class="officer.duty_status === 'on duty' ? 'bg-[#0ca30c]/10 text-[#0ca30c]' : 'bg-muted text-muted-foreground'"
+                        class="rounded-full px-2.5 py-1 text-xs font-medium capitalize transition-opacity hover:opacity-80 disabled:cursor-not-allowed disabled:opacity-60"
+                        :class="officer.duty_status === 'on_duty' ? 'bg-[#0ca30c]/10 text-[#0ca30c]' : 'bg-muted text-muted-foreground'"
                         @click="toggleDutyStatus(officer)"
                       >
-                        {{ officer.duty_status }}
+                        {{ officer.duty_status.replace('_', ' ') }}
                       </button>
                     </td>
                   </tr>

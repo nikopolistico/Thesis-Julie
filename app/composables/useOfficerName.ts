@@ -1,12 +1,6 @@
-export function useOfficerName() {
-  const supabase = useSupabaseClient()
-  const name = ref('')
+import type { ComputedRef, Ref } from 'vue'
 
-  async function loadOfficerName(officerId: number) {
-    const { data, error } = await supabase.rpc('get_officer_name', { p_officer_id: officerId })
-    if (!error && data) name.value = data
-  }
-
+export function useOfficerName(name: Ref<string> | ComputedRef<string>) {
   const initials = computed(() => {
     const parts = name.value.trim().split(/\s+/).filter(Boolean)
     if (parts.length === 0) return ''
@@ -14,5 +8,5 @@ export function useOfficerName() {
     return (parts[0][0] + parts[parts.length - 1][0]).toUpperCase()
   })
 
-  return { name, initials, loadOfficerName }
+  return { initials }
 }

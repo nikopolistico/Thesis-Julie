@@ -3,6 +3,8 @@ import {
   Activity,
   AlertTriangle,
   Bell,
+  CheckCircle2,
+  ClipboardCheck,
   LayoutDashboard,
   LoaderCircle,
   LogOut,
@@ -18,6 +20,7 @@ import { computed, onMounted, ref } from 'vue'
 
 definePageMeta({
   middleware: 'auth',
+  requiredRole: 'nurse',
 })
 
 useHead({
@@ -33,13 +36,12 @@ useHead({
 const supabase = useSupabaseClient()
 const session = useAdminSession()
 const officerId = computed(() => Number(session.value?.id))
-console.log('Officer ID:', officerId.value)
+const officerFullName = computed(() => session.value?.fullName ?? '')
 
 const { isDark, init: initDarkMode, toggle: toggleDarkMode } = useDarkMode()
 onMounted(initDarkMode)
 
-const { name: officerName, initials: officerInitials, loadOfficerName } = useOfficerName()
-onMounted(() => loadOfficerName(officerId.value))
+const { initials: officerInitials } = useOfficerName(officerFullName)
 
 const isLoggingOut = ref(false)
 const showLogoutConfirm = ref(false)
@@ -56,6 +58,7 @@ const navItems = [
   { label: 'Overview', icon: LayoutDashboard, section: 'overview' },
   { label: 'My Patients', icon: Users, section: 'patients' },
   { label: 'Discharge Requests', icon: Stethoscope, section: 'discharge-requests' },
+  { label: 'My Tasks', icon: ClipboardCheck, section: 'tasks' },
 ] as const
 
 type Section = typeof navItems[number]['section']
@@ -63,17 +66,17 @@ type Section = typeof navItems[number]['section']
 const activeSection = ref<Section>('overview')
 
 interface Patient {
-  id: number
+  patient_id: number
   full_name: string
-  admission_date: string
-  philhealth_no: string
-  officer_id: number
-  age: number | null
   date_of_birth: string | null
+  age: number | null
   contact_number: string | null
   emergency_contact: string | null
-  room_number: number | null
+  admission_date: string
   discharge_date: string | null
+  room_number: number | null
+  philhealth_no: string | null
+  attending_officer_id: number | null
 }
 
 interface DischargeRequest {
@@ -82,12 +85,23 @@ interface DischargeRequest {
   patient_name: string
   status: string
   billing_verified: boolean
-  discharge_date: string | null
   timestamp: string
+}
+
+interface NurseTask {
+  task_id: number
+  discharge_request_id: number
+  patient_id: number
+  patient_name: string
+  task_type: string
+  status: string
+  created_at: string
+  completed_at: string | null
 }
 
 const patients = ref<Patient[]>([])
 const dischargeRequests = ref<DischargeRequest[]>([])
+const tasks = ref<NurseTask[]>([])
 const isLoadingData = ref(false)
 const dataError = ref('')
 const searchQuery = ref('')
@@ -96,21 +110,20 @@ async function loadDashboardData() {
   isLoadingData.value = true
   const errors: string[] = []
 
-  const patientsRes = await supabase.rpc('list_patients_by_officer', { p_officer_id: officerId.value })
-  if (patientsRes.error) {
-    errors.push(`Patients: ${patientsRes.error.message}`)
-  } else {
-    patients.value = patientsRes.data ?? []
-  }
+  const [patientsRes, requestsRes, tasksRes] = await Promise.all([
+    supabase.rpc('list_patients_by_officer', { p_officer_id: officerId.value }),
+    supabase.rpc('list_discharge_requests_by_requester', { p_officer_id: officerId.value }),
+    supabase.rpc('list_tasks_for_officer_detailed', { p_officer_id: officerId.value }),
+  ])
 
-  const requestsRes = await supabase.rpc('list_discharge_requests_by_officer', { p_officer_id: officerId.value })
+  if (patientsRes.error) errors.push(`Patients: ${patientsRes.error.message}`)
+  else patients.value = patientsRes.data ?? []
 
-  console.log('Discharge requests response:', requestsRes)  
-  if (requestsRes.error) {
-    errors.push(`Discharge requests: ${requestsRes.error.message}`)
-  } else {
-    dischargeRequests.value = requestsRes.data ?? []
-  }
+  if (requestsRes.error) errors.push(`Discharge requests: ${requestsRes.error.message}`)
+  else dischargeRequests.value = requestsRes.data ?? []
+
+  if (tasksRes.error) errors.push(`Tasks: ${tasksRes.error.message}`)
+  else tasks.value = tasksRes.data ?? []
 
   dataError.value = errors.join(' ')
   isLoadingData.value = false
@@ -123,7 +136,7 @@ const filteredPatients = computed(() => {
   if (!q) return patients.value
   return patients.value.filter((patient) => {
     return patient.full_name.toLowerCase().includes(q)
-      || patient.philhealth_no.toLowerCase().includes(q)
+      || (patient.philhealth_no ?? '').toLowerCase().includes(q)
       || (patient.contact_number ?? '').toLowerCase().includes(q)
       || String(patient.room_number ?? '').includes(q)
   })
@@ -152,22 +165,42 @@ const summaryChartData = computed(() => {
 const hoveredSummary = ref<string | null>(null)
 
 const statusBarColor: Record<string, string> = {
-  Pending: '#fab219',
-  Approved: '#0ca30c',
-  Rejected: '#d03b3b',
-  Completed: '#898781',
+  pending: '#fab219',
+  in_progress: '#2a78d6',
+  approved: '#0ca30c',
+  completed: '#898781',
+  rejected: '#d03b3b',
 }
 
+const pendingTasks = computed(() => tasks.value.filter((t) => t.status !== 'done'))
+
 // ── Overview: recent activity ───────────────────────────────────────────
-// Both lists arrive pre-sorted newest-first from their RPCs.
 
 const recentPatients = computed(() => patients.value.slice(0, 5))
 const recentDischargeRequests = computed(() => dischargeRequests.value.slice(0, 5))
 
-const pendingRequestsNeedingBilling = computed(() =>
-  dischargeRequests.value.filter((r) => r.status === 'Pending' && !r.billing_verified).length)
+// ── Tasks: complete nurse clearance ─────────────────────────────────────
 
-// ── Discharge requests: create / update status ────────────────────────
+const completingTaskId = ref<number | null>(null)
+const taskActionError = ref('')
+
+async function completeTask(taskId: number) {
+  completingTaskId.value = taskId
+  taskActionError.value = ''
+
+  const { error } = await supabase.rpc('complete_task', { p_task_id: taskId })
+
+  if (error) {
+    taskActionError.value = error.message
+    completingTaskId.value = null
+    return
+  }
+
+  completingTaskId.value = null
+  await loadDashboardData()
+}
+
+// ── Discharge requests: create ────────────────────────────────────────
 
 const requestFormError = ref('')
 const showRequestForm = ref(false)
@@ -176,11 +209,13 @@ const requestPatientId = ref<number | null>(null)
 const requestPatientSearch = ref('')
 const isSavingRequest = ref(false)
 
-function hasPendingRequest(patientId: number) {
-  return dischargeRequests.value.some((r) => r.patient_id === patientId && r.status === 'Pending')
+const TERMINAL_STATUSES = ['completed', 'rejected']
+
+function hasActiveRequest(patientId: number) {
+  return dischargeRequests.value.some((r) => r.patient_id === patientId && !TERMINAL_STATUSES.includes(r.status))
 }
 
-const dischargeablePatients = computed(() => patients.value.filter((p) => !p.discharge_date && !hasPendingRequest(p.id)))
+const dischargeablePatients = computed(() => patients.value.filter((p) => !p.discharge_date && !hasActiveRequest(p.patient_id)))
 
 const filteredRequestPatients = computed(() => {
   const q = requestPatientSearch.value.trim().toLowerCase()
@@ -188,10 +223,10 @@ const filteredRequestPatients = computed(() => {
   return dischargeablePatients.value.filter((p) => p.full_name.toLowerCase().includes(q))
 })
 
-const selectedRequestPatientName = computed(() => patients.value.find((p) => p.id === requestPatientId.value)?.full_name ?? '')
+const selectedRequestPatientName = computed(() => patients.value.find((p) => p.patient_id === requestPatientId.value)?.full_name ?? '')
 
 function openNewRequestForm() {
-  requestPatientId.value = dischargeablePatients.value[0]?.id ?? null
+  requestPatientId.value = dischargeablePatients.value[0]?.patient_id ?? null
   requestPatientSearch.value = ''
   requestFormError.value = ''
   showRequestForm.value = true
@@ -231,14 +266,12 @@ const showPatientForm = ref(false)
 const editingPatientId = ref<number | null>(null)
 const emptyPatientForm = {
   full_name: '',
-  admission_date: '',
-  philhealth_no: '',
-  age: '',
   date_of_birth: '',
+  age: '',
   contact_number: '',
   emergency_contact: '',
   room_number: '',
-  discharge_date: '',
+  philhealth_no: '',
 }
 const patientForm = ref({ ...emptyPatientForm })
 const isSavingPatient = ref(false)
@@ -251,9 +284,8 @@ const patientPreviewFields = computed(() => [
   { label: 'Date of birth', value: patientForm.value.date_of_birth || '—' },
   { label: 'Contact number', value: patientForm.value.contact_number || '—' },
   { label: 'Emergency contact', value: patientForm.value.emergency_contact || '—' },
-  { label: 'Admission date', value: patientForm.value.admission_date },
   { label: 'Room number', value: patientForm.value.room_number || '—' },
-  { label: 'PhilHealth No.', value: patientForm.value.philhealth_no },
+  { label: 'PhilHealth No.', value: patientForm.value.philhealth_no || '—' },
 ])
 
 function openNewPatientForm() {
@@ -265,17 +297,15 @@ function openNewPatientForm() {
 }
 
 function openEditPatientForm(patient: Patient) {
-  editingPatientId.value = patient.id
+  editingPatientId.value = patient.patient_id
   patientForm.value = {
     full_name: patient.full_name,
-    admission_date: patient.admission_date,
-    philhealth_no: patient.philhealth_no,
-    age: patient.age === null ? '' : String(patient.age),
     date_of_birth: patient.date_of_birth ?? '',
+    age: patient.age === null ? '' : String(patient.age),
     contact_number: patient.contact_number ?? '',
     emergency_contact: patient.emergency_contact ?? '',
     room_number: patient.room_number === null ? '' : String(patient.room_number),
-    discharge_date: patient.discharge_date ?? '',
+    philhealth_no: patient.philhealth_no ?? '',
   }
   patientFormError.value = ''
   patientFormStep.value = 'form'
@@ -295,33 +325,28 @@ async function submitPatientForm() {
   isSavingPatient.value = true
   patientFormError.value = ''
 
-  if(patientForm.value.contact_number && !/^\+?\d{7,15}$/.test(patientForm.value.contact_number)) {
+  if (patientForm.value.contact_number && !/^\+?\d{7,15}$/.test(patientForm.value.contact_number)) {
     patientFormError.value = 'Invalid contact number format. Please enter a valid number.'
     isSavingPatient.value = false
     return
   }
 
-  const sharedFields = {
-    p_full_name: patientForm.value.full_name,
-    p_admission_date: patientForm.value.admission_date,
-    p_philhealth_no: patientForm.value.philhealth_no,
-    p_age: patientForm.value.age === '' ? null : Number(patientForm.value.age),
-    p_date_of_birth: patientForm.value.date_of_birth || null,
-    p_contact_number: patientForm.value.contact_number || null,
-    p_emergency_contact: patientForm.value.emergency_contact || null,
-    p_room_number: patientForm.value.room_number === '' ? null : Number(patientForm.value.room_number),
-    p_discharge_date: patientForm.value.discharge_date || null,
-  }
-
   const { error } = editingPatientId.value === null
-    ? await supabase.rpc('create_patient', {
-        ...sharedFields,
-        p_officer_id: officerId.value,
+    ? await supabase.rpc('register_patient', {
+        p_full_name: patientForm.value.full_name,
+        p_date_of_birth: patientForm.value.date_of_birth || null,
+        p_age: patientForm.value.age === '' ? null : Number(patientForm.value.age),
+        p_contact_number: patientForm.value.contact_number || null,
+        p_emergency_contact: patientForm.value.emergency_contact || null,
+        p_room_number: patientForm.value.room_number === '' ? null : Number(patientForm.value.room_number),
+        p_philhealth_no: patientForm.value.philhealth_no || null,
+        p_attending_officer_id: officerId.value,
       })
-    : await supabase.rpc('update_patient', {
-        p_id: editingPatientId.value,
-        ...sharedFields,
-        p_officer_id: officerId.value,
+    : await supabase.rpc('update_patient_info', {
+        p_patient_id: editingPatientId.value,
+        p_contact_number: patientForm.value.contact_number || null,
+        p_emergency_contact: patientForm.value.emergency_contact || null,
+        p_room_number: patientForm.value.room_number === '' ? null : Number(patientForm.value.room_number),
       })
 
   if (error) {
@@ -360,6 +385,12 @@ async function submitPatientForm() {
         >
           <component :is="item.icon" class="h-4 w-4" />
           {{ item.label }}
+          <span
+            v-if="item.section === 'tasks' && pendingTasks.length > 0"
+            class="ml-auto rounded-full bg-primary/15 px-1.5 py-0.5 text-[10px] font-semibold text-primary"
+          >
+            {{ pendingTasks.length }}
+          </span>
         </button>
       </nav>
 
@@ -369,7 +400,7 @@ async function submitPatientForm() {
             {{ officerInitials || 'RN' }}
           </span>
           <div class="min-w-0 flex-1 leading-tight">
-            <p class="truncate text-sm font-medium">{{ officerName || 'Nurse' }}</p>
+            <p class="truncate text-sm font-medium">{{ officerFullName || 'Nurse' }}</p>
             <p class="truncate text-xs text-muted-foreground">Patient Records</p>
           </div>
         </div>
@@ -422,7 +453,7 @@ async function submitPatientForm() {
               {{ officerInitials || 'RN' }}
             </span>
             <div class="min-w-0 flex-1 leading-tight">
-              <p class="truncate text-sm font-medium">{{ officerName || 'Nurse' }}</p>
+              <p class="truncate text-sm font-medium">{{ officerFullName || 'Nurse' }}</p>
               <p class="truncate text-xs text-muted-foreground">Patient Records</p>
             </div>
           </div>
@@ -473,7 +504,7 @@ async function submitPatientForm() {
 
         <button aria-label="Notifications" class="relative text-muted-foreground hover:text-foreground">
           <Bell class="h-5 w-5" />
-          <span class="absolute -right-0.5 -top-0.5 h-2 w-2 rounded-full bg-[#d03b3b]" />
+          <span v-if="pendingTasks.length > 0" class="absolute -right-0.5 -top-0.5 h-2 w-2 rounded-full bg-[#d03b3b]" />
         </button>
 
         <span class="flex h-8 w-8 items-center justify-center rounded-full bg-secondary text-xs font-medium text-secondary-foreground">
@@ -525,9 +556,9 @@ async function submitPatientForm() {
           </div>
 
           <!-- Needs attention -->
-          <div v-if="pendingRequestsNeedingBilling > 0" class="flex items-center gap-2 rounded-md bg-[#fab219]/10 px-3 py-2.5 text-sm text-[#c98500]">
+          <div v-if="pendingTasks.length > 0" class="flex items-center gap-2 rounded-md bg-[#fab219]/10 px-3 py-2.5 text-sm text-[#c98500]">
             <AlertTriangle class="h-4 w-4 shrink-0" />
-            {{ pendingRequestsNeedingBilling }} pending discharge request{{ pendingRequestsNeedingBilling === 1 ? '' : 's' }} still awaiting billing verification.
+            {{ pendingTasks.length }} nurse clearance task{{ pendingTasks.length === 1 ? '' : 's' }} still awaiting completion.
           </div>
 
           <div class="grid gap-4 lg:grid-cols-2">
@@ -537,7 +568,7 @@ async function submitPatientForm() {
               <p class="text-xs text-muted-foreground">Your 5 newest patients</p>
 
               <ul class="mt-4 divide-y divide-border">
-                <li v-for="patient in recentPatients" :key="patient.id" class="flex items-center justify-between gap-3 py-2.5 text-sm">
+                <li v-for="patient in recentPatients" :key="patient.patient_id" class="flex items-center justify-between gap-3 py-2.5 text-sm">
                   <div class="min-w-0">
                     <p class="truncate font-medium">{{ patient.full_name }}</p>
                     <p class="text-xs text-muted-foreground">Room {{ patient.room_number ?? '—' }}</p>
@@ -560,11 +591,11 @@ async function submitPatientForm() {
                     <p class="text-xs text-muted-foreground">{{ new Date(request.timestamp).toLocaleDateString() }}</p>
                   </div>
                   <span
-                    class="inline-flex shrink-0 items-center gap-1.5 rounded-full px-2 py-1 text-xs font-medium"
+                    class="inline-flex shrink-0 items-center gap-1.5 rounded-full px-2 py-1 text-xs font-medium capitalize"
                     :style="{ backgroundColor: `${statusBarColor[request.status] ?? '#898781'}1a`, color: statusBarColor[request.status] ?? '#898781' }"
                   >
                     <span class="h-1.5 w-1.5 rounded-full" :style="{ backgroundColor: statusBarColor[request.status] ?? '#898781' }" />
-                    {{ request.status }}
+                    {{ request.status.replace('_', ' ') }}
                   </span>
                 </li>
                 <li v-if="recentDischargeRequests.length === 0" class="py-6 text-center text-sm text-muted-foreground">No discharge requests yet.</li>
@@ -604,11 +635,11 @@ async function submitPatientForm() {
                 </tr>
               </thead>
               <tbody class="divide-y divide-border">
-                <tr v-for="patient in filteredPatients" :key="patient.id">
+                <tr v-for="patient in filteredPatients" :key="patient.patient_id">
                   <td class="py-2 pr-4 font-medium">{{ patient.full_name }}</td>
                   <td class="py-2 pr-4 text-muted-foreground">{{ patient.admission_date }}</td>
                   <td class="py-2 pr-4 text-muted-foreground">{{ patient.room_number ?? '—' }}</td>
-                  <td class="py-2 pr-4 text-muted-foreground">{{ patient.philhealth_no }}</td>
+                  <td class="py-2 pr-4 text-muted-foreground">{{ patient.philhealth_no ?? '—' }}</td>
                   <td class="py-2 pr-4 text-muted-foreground">{{ patient.discharge_date ?? '—' }}</td>
                   <td class="py-2 text-right">
                     <button type="button" class="text-xs font-medium text-primary hover:underline" @click="openEditPatientForm(patient)">
@@ -650,7 +681,6 @@ async function submitPatientForm() {
                   <th class="pb-2 pr-4 font-medium">Patient</th>
                   <th class="pb-2 pr-4 font-medium">Billing Verified</th>
                   <th class="pb-2 pr-4 font-medium">Submitted</th>
-                  <th class="pb-2 pr-4 font-medium">Date Approved</th>
                   <th class="pb-2 font-medium">Status</th>
                 </tr>
               </thead>
@@ -659,19 +689,71 @@ async function submitPatientForm() {
                   <td class="py-2 pr-4 font-medium">{{ request.patient_name }}</td>
                   <td class="py-2 pr-4 text-muted-foreground">{{ request.billing_verified ? 'Yes' : 'No' }}</td>
                   <td class="py-2 pr-4 text-muted-foreground">{{ new Date(request.timestamp).toLocaleString() }}</td>
-                  <td class="py-2 pr-4 text-muted-foreground">{{ request.discharge_date ?? '—' }}</td>
                   <td class="py-2">
                     <span
-                      class="inline-flex items-center gap-1.5 rounded-full px-2 py-1 text-xs font-medium"
+                      class="inline-flex items-center gap-1.5 rounded-full px-2 py-1 text-xs font-medium capitalize"
                       :style="{ backgroundColor: `${statusBarColor[request.status] ?? '#898781'}1a`, color: statusBarColor[request.status] ?? '#898781' }"
                     >
                       <span class="h-1.5 w-1.5 rounded-full" :style="{ backgroundColor: statusBarColor[request.status] ?? '#898781' }" />
-                      {{ request.status }}
+                      {{ request.status.replace('_', ' ') }}
                     </span>
                   </td>
                 </tr>
                 <tr v-if="!isLoadingData && dischargeRequests.length === 0">
-                  <td colspan="5" class="py-6 text-center text-sm text-muted-foreground">No discharge requests yet.</td>
+                  <td colspan="4" class="py-6 text-center text-sm text-muted-foreground">No discharge requests yet.</td>
+                </tr>
+              </tbody>
+            </table>
+          </div>
+        </div>
+
+        <!-- Tasks -->
+        <div v-if="activeSection === 'tasks'" class="rounded-xl border border-border bg-card p-5">
+          <h2 class="text-sm font-medium">Nurse Clearance Tasks</h2>
+          <p class="text-xs text-muted-foreground">Auto-assigned when a discharge request is filed</p>
+
+          <div v-if="taskActionError" class="mt-4 flex items-center gap-2 rounded-md bg-[#d03b3b]/10 px-3 py-2.5 text-sm text-[#d03b3b]">
+            <AlertTriangle class="h-4 w-4 shrink-0" />
+            {{ taskActionError }}
+          </div>
+
+          <div class="mt-4 overflow-x-auto">
+            <table class="w-full text-sm">
+              <thead>
+                <tr class="border-b border-border text-left text-xs text-muted-foreground">
+                  <th class="pb-2 pr-4 font-medium">Patient</th>
+                  <th class="pb-2 pr-4 font-medium">Assigned</th>
+                  <th class="pb-2 pr-4 font-medium">Status</th>
+                  <th class="pb-2 font-medium" />
+                </tr>
+              </thead>
+              <tbody class="divide-y divide-border">
+                <tr v-for="task in tasks" :key="task.task_id">
+                  <td class="py-2 pr-4 font-medium">{{ task.patient_name }}</td>
+                  <td class="py-2 pr-4 text-muted-foreground">{{ new Date(task.created_at).toLocaleString() }}</td>
+                  <td class="py-2 pr-4">
+                    <span
+                      class="inline-flex items-center gap-1.5 rounded-full px-2 py-1 text-xs font-medium"
+                      :class="task.status === 'done' ? 'bg-[#0ca30c]/10 text-[#0ca30c]' : 'bg-muted text-muted-foreground'"
+                    >
+                      <CheckCircle2 v-if="task.status === 'done'" class="h-3.5 w-3.5" />
+                      {{ task.status === 'done' ? 'Done' : 'Pending' }}
+                    </span>
+                  </td>
+                  <td class="py-2 text-right">
+                    <button
+                      v-if="task.status !== 'done'"
+                      type="button"
+                      :disabled="completingTaskId === task.task_id"
+                      class="text-xs font-medium text-primary hover:underline disabled:cursor-not-allowed disabled:opacity-60"
+                      @click="completeTask(task.task_id)"
+                    >
+                      {{ completingTaskId === task.task_id ? 'Completing…' : 'Mark Complete' }}
+                    </button>
+                  </td>
+                </tr>
+                <tr v-if="!isLoadingData && tasks.length === 0">
+                  <td colspan="4" class="py-6 text-center text-sm text-muted-foreground">No tasks assigned yet.</td>
                 </tr>
               </tbody>
             </table>
@@ -723,6 +805,9 @@ async function submitPatientForm() {
           <template v-else>{{ editingPatientId === null ? 'Confirm New Patient' : 'Confirm Patient Changes' }}</template>
         </h2>
         <p v-if="patientFormStep === 'preview'" class="mt-1 shrink-0 text-xs text-muted-foreground">Please check the details below before saving.</p>
+        <p v-else-if="editingPatientId !== null" class="mt-1 shrink-0 text-xs text-muted-foreground">
+          Only contact info and room number can be changed after registration.
+        </p>
 
         <form class="mt-4 flex min-h-0 flex-1 flex-col" @submit.prevent="handlePatientFormSubmit">
         <div v-if="patientFormStep === 'form'" class="min-h-0 flex-1 space-y-4 overflow-y-auto pr-1">
@@ -733,7 +818,8 @@ async function submitPatientForm() {
               v-model="patientForm.full_name"
               type="text"
               required
-              class="w-full rounded-md border border-input bg-background px-3 py-2 text-sm outline-none focus-visible:ring-2 focus-visible:ring-ring"
+              :disabled="editingPatientId !== null"
+              class="w-full rounded-md border border-input bg-background px-3 py-2 text-sm outline-none focus-visible:ring-2 focus-visible:ring-ring disabled:opacity-60"
             >
           </div>
           <div class="grid grid-cols-2 gap-3">
@@ -744,7 +830,8 @@ async function submitPatientForm() {
                 v-model="patientForm.age"
                 type="number"
                 min="0"
-                class="w-full rounded-md border border-input bg-background px-3 py-2 text-sm outline-none focus-visible:ring-2 focus-visible:ring-ring"
+                :disabled="editingPatientId !== null"
+                class="w-full rounded-md border border-input bg-background px-3 py-2 text-sm outline-none focus-visible:ring-2 focus-visible:ring-ring disabled:opacity-60"
               >
             </div>
             <div class="space-y-1.5">
@@ -753,7 +840,8 @@ async function submitPatientForm() {
                 id="patient-dob"
                 v-model="patientForm.date_of_birth"
                 type="date"
-                class="w-full rounded-md border border-input bg-background px-3 py-2 text-sm outline-none focus-visible:ring-2 focus-visible:ring-ring"
+                :disabled="editingPatientId !== null"
+                class="w-full rounded-md border border-input bg-background px-3 py-2 text-sm outline-none focus-visible:ring-2 focus-visible:ring-ring disabled:opacity-60"
               >
             </div>
           </div>
@@ -775,27 +863,15 @@ async function submitPatientForm() {
               class="w-full rounded-md border border-input bg-background px-3 py-2 text-sm outline-none focus-visible:ring-2 focus-visible:ring-ring"
             >
           </div>
-          <div class="grid grid-cols-2 gap-3">
-            <div class="space-y-1.5">
-              <label for="patient-admission" class="text-sm font-medium">Admission date</label>
-              <input
-                id="patient-admission"
-                v-model="patientForm.admission_date"
-                type="date"
-                required
-                class="w-full rounded-md border border-input bg-background px-3 py-2 text-sm outline-none focus-visible:ring-2 focus-visible:ring-ring"
-              >
-            </div>
-            <div class="space-y-1.5">
-              <label for="patient-room" class="text-sm font-medium">Room number</label>
-              <input
-                id="patient-room"
-                v-model="patientForm.room_number"
-                type="number"
-                min="0"
-                class="w-full rounded-md border border-input bg-background px-3 py-2 text-sm outline-none focus-visible:ring-2 focus-visible:ring-ring"
-              >
-            </div>
+          <div class="space-y-1.5">
+            <label for="patient-room" class="text-sm font-medium">Room number</label>
+            <input
+              id="patient-room"
+              v-model="patientForm.room_number"
+              type="number"
+              min="0"
+              class="w-full rounded-md border border-input bg-background px-3 py-2 text-sm outline-none focus-visible:ring-2 focus-visible:ring-ring"
+            >
           </div>
           <div class="space-y-1.5">
             <label for="patient-philhealth" class="text-sm font-medium">PhilHealth No.</label>
@@ -803,8 +879,8 @@ async function submitPatientForm() {
               id="patient-philhealth"
               v-model="patientForm.philhealth_no"
               type="text"
-              required
-              class="w-full rounded-md border border-input bg-background px-3 py-2 text-sm outline-none focus-visible:ring-2 focus-visible:ring-ring"
+              :disabled="editingPatientId !== null"
+              class="w-full rounded-md border border-input bg-background px-3 py-2 text-sm outline-none focus-visible:ring-2 focus-visible:ring-ring disabled:opacity-60"
             >
           </div>
         </div>
@@ -849,6 +925,9 @@ async function submitPatientForm() {
       <div class="absolute inset-0 bg-black/40" @click="!isSavingRequest && (showRequestForm = false)" />
       <div class="relative w-full max-w-sm rounded-xl border border-border bg-card p-6 shadow-lg">
         <h2 class="text-base font-semibold tracking-tight">New Discharge Request</h2>
+        <p class="mt-1 text-xs text-muted-foreground">
+          Filing this auto-assigns nurse, doctor, billing, and PhilHealth tasks to on-duty staff.
+        </p>
 
         <form class="mt-4 space-y-4" @submit.prevent="confirmNewRequest">
           <div class="space-y-1.5">
@@ -866,13 +945,13 @@ async function submitPatientForm() {
             <div class="max-h-48 space-y-1 overflow-y-auto rounded-md border border-border p-1.5">
               <button
                 v-for="patient in filteredRequestPatients"
-                :key="patient.id"
+                :key="patient.patient_id"
                 type="button"
                 class="w-full rounded-md px-2.5 py-1.5 text-left text-sm transition-colors"
-                :class="requestPatientId === patient.id
+                :class="requestPatientId === patient.patient_id
                   ? 'bg-primary/10 text-primary'
                   : 'hover:bg-muted'"
-                @click="requestPatientId = patient.id"
+                @click="requestPatientId = patient.patient_id"
               >
                 {{ patient.full_name }}
               </button>

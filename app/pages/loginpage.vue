@@ -16,6 +16,7 @@ import {
   Moon,
 } from '@lucide/vue'
 import { onMounted, ref } from 'vue'
+import type { AdminSession } from '~/composables/useAdminSession'
 
 const brandHighlights = [
   { icon: ClipboardList, text: 'Digitized charts & records' },
@@ -41,7 +42,6 @@ const session = useAdminSession()
 
 const email = ref('')
 const password = ref('')
-const role = ref<'doctor' | 'nurse' | 'admin'>('doctor')
 const showPassword = ref(false)
 const isSubmitting = ref(false)
 const errorMessage = ref('')
@@ -51,32 +51,22 @@ async function handleSubmit() {
   isSubmitting.value = true
 
   const { data, error } = await supabase
-    .rpc('login_administrator', { p_email: email.value, p_password: password.value, p_role: role.value })
+    .rpc('login_officer', { p_email: email.value, p_password: password.value })
     .single()
 
-      console.log('Login successful:', data)
-
-  if (error) {
+  if (error || !data) {
     errorMessage.value = 'Incorrect email or password.'
     isSubmitting.value = false
     return
   }
 
-  if (!data) {
-    errorMessage.value = 'Incorrect email or password.'
-    isSubmitting.value = false
-    return
+  session.value = {
+    id: String(data.officer_id),
+    email: data.email,
+    fullName: data.full_name,
+    role: data.role as AdminSession['role'],
   }
-
-
-  session.value = { id: String(data.user_id), email: data.email }
-  await navigateTo(
-    role.value === 'admin'
-      ? '/admindashboardpage'
-      : role.value === 'doctor'
-        ? '/doctordashboardpage'
-        : '/nursedashboardpage',
-  )
+  await navigateTo(dashboardPathForRole(session.value.role))
 }
 </script>
 
@@ -165,18 +155,6 @@ async function handleSubmit() {
             </div>
           </div>
 
-          <div class="space-y-1.5">
-            <label for="role" class="text-sm font-medium">Role</label>
-            <select
-              id="role"
-              v-model="role"
-              class="w-full rounded-md border border-input bg-background py-2.5 px-3 text-sm outline-none ring-offset-background transition-colors focus-visible:ring-2 focus-visible:ring-ring"
-            >
-              <option value="doctor">Doctor</option>
-              <option value="nurse">Nurse</option>
-              <option value="admin">Admin</option>
-            </select>
-          </div>
           </fieldset>
 
           <div
